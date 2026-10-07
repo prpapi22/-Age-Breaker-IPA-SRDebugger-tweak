@@ -1,11 +1,7 @@
 #import <Foundation/Foundation.h>
 #include <mach-o/dyld.h>
-#include <dlfcn.h>
 #include <string.h>
-#include <stdbool.h>
-
-static bool hk_true(void *s){ return true; }
-static int  hk_zero(void *s){ return 0; }
+#include <stdint.h>
 
 static void L(NSString *m){
   NSLog(@"[SRDE] %@", m);
@@ -19,38 +15,42 @@ static void L(NSString *m){
   [h closeFile];
 }
 
-typedef struct { uintptr_t rva; uint32_t expect; void *hook; const char *name; } T;
-
-static void go(void){
-  void (*Hook)(void*,void*,void**) = dlsym(RTLD_DEFAULT,"MSHookFunction");
-  if(!Hook){ L(@"MSHookFunction not found"); return; }
-  uintptr_t base = 0;
+static uintptr_t unity_base(void){
   for(uint32_t i=0;i<_dyld_image_count();i++){
     const char *n=_dyld_get_image_name(i);
-    if(n && strstr(n,"UnityFramework.framework/UnityFramework")){
-      base=(uintptr_t)_dyld_get_image_header(i); break; }
+    if(n && strstr(n,"UnityFramework.framework/UnityFramework"))
+      return (uintptr_t)_dyld_get_image_header(i);
   }
-  if(!base){ L(@"UnityFramework not found"); return; }
-  L([NSString stringWithFormat:@"base=%p",(void*)base]);
-  T t[] = {
-    {0x5C0F494,0x39408000,hk_true,"IsEnabled"},
-    {0x5C0F4A4,0xB9402800,hk_zero,"EnableTrigger"},
-    {0x5C0F4AC,0xB9402C00,hk_zero,"TriggerBehaviour"},
-    {0x5C0F7F0,0xB9409400,hk_zero,"TriggerPosition"},
-    {0x5C0F828,0x39427000,hk_true,"EventSystem"},
-  };
-  for(int i=0;i<5;i++){
-    uint32_t *p=(uint32_t*)(base+t[i].rva);
-    L([NSString stringWithFormat:@"%s: %08x %08x (expect %08x)",t[i].name,p[0],p[1],t[i].expect]);
-    if(p[0]!=t[i].expect){ L(@"  MISMATCH - skipped"); continue; }
-    Hook(p,t[i].hook,NULL);
-    L(@"  hooked");
-  }
-  L(@"done");
+  return 0;
+}
+
+static void go(void){
+  uintptr_t b = unity_base();
+  if(!b){ L(@"UnityFramework not found"); return; }
+  L([NSString stringWithFormat:@"base=%p",(void*)b]);
+
+  void *(*getInst)(void*) = (void*(*)(void*))(b+0x5C0E608);
+  void  (*initSR)(void*)  = (void(*)(void*))(b+0x5C0E3B0);
+
+  uint8_t *s = (uint8_t*)getInst(NULL);
+  L([NSString stringWithFormat:@"Settings=%p",s]);
+  if(!s || !*(uintptr_t*)(s+0x10)){ L(@"bad Settings object, aborting"); return; }
+
+  *(uint8_t*)(s+0x20)  = 1;   // _isEnabled
+  *(int32_t*)(s+0x28)  = 0;   // trigger mode: Enabled
+  *(int32_t*)(s+0x2C)  = 0;   // TripleTap
+  *(uint8_t*)(s+0x4F)  = 0;   // no entry code
+  *(uint8_t*)(s+0x50)  = 0;
+  *(int32_t*)(s+0x94)  = 0;   // TopLeft
+  *(uint8_t*)(s+0x9C)  = 1;   // create EventSystem
+  L(@"settings written");
+
+  initSR(NULL);
+  L(@"Init called");
 }
 
 __attribute__((constructor)) static void init(void){
   L(@"loaded");
-  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,6*NSEC_PER_SEC),
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,12*NSEC_PER_SEC),
                  dispatch_get_main_queue(), ^{ go(); });
 }
